@@ -1,0 +1,128 @@
+#include <ArduinoJson.h>
+
+// Your motor pins configuration
+#define ena 10
+#define in1 2
+#define in2 3
+#define in3 4
+#define in4 5
+#define enb 11
+
+// PID parameters
+float Kp = 0.5;
+float Ki = 0.01;
+float Kd = 0.1;
+float prev_error = 0;
+float integral = 0;
+float baseSpeed = 100;  // Base speed for straight movement
+
+void setup() {
+  Serial.begin(115200);
+  
+  // Initialize motor control pins
+  pinMode(in1, OUTPUT);
+  pinMode(in2, OUTPUT);
+  pinMode(in3, OUTPUT);
+  pinMode(in4, OUTPUT);
+  pinMode(ena, OUTPUT);
+  pinMode(enb, OUTPUT);
+  
+  stop();  // Initial stop
+}
+
+void loop() {
+  if (Serial.available()) {
+    String data = Serial.readStringUntil('\n');
+    processData(data);
+  }
+}
+
+void processData(String jsonData) {
+  StaticJsonDocument<200> doc;
+  DeserializationError error = deserializeJson(doc, jsonData);
+
+  if (error) {
+    Serial.print("JSON Error: ");
+    Serial.println(error.c_str());
+    return;
+  }
+
+  // Extract values
+  float left = doc["l"] | 0.0;
+  float right = doc["r"] | 0.0;
+  String driverState = doc["d"] | "awake";
+  String trafficSign = doc["s"] | "";
+
+  // Emergency stop conditions
+  if (driverState == "sleeping" || trafficSign == "Stop") {
+    stop();
+    return;
+  }
+
+  // PID calculations
+  float setpoint = 0.0;
+  float actual = (left + right) / 2.0;
+  float error = setpoint - actual;
+  
+  integral += error;
+  float derivative = error - prev_error;
+  float adjustment = (Kp * error) + (Ki * integral) + (Kd * derivative);
+  
+  // Apply motor control
+  adjustMotors(adjustment);
+  
+  prev_error = error;
+}
+
+void adjustMotors(float steering) {
+  if (steering > 0.1) { // Right turn needed
+    right_turn();
+    speed(baseSpeed + abs(steering * 20));
+  } 
+  else if (steering < -0.1) { // Left turn needed
+    left_turn();
+    speed(baseSpeed + abs(steering * 20));
+  } 
+  else { // Go straight
+    forward();
+    speed(baseSpeed);
+  }
+}
+
+// Your existing motor functions
+void speed(float speed) {
+  analogWrite(ena, speed);
+  analogWrite(enb, speed);
+}
+
+void right_turn() {
+  digitalWrite(in1, HIGH);
+  digitalWrite(in2, LOW);
+  digitalWrite(in3, LOW);
+  digitalWrite(in4, HIGH);
+}
+
+void left_turn() {
+  digitalWrite(in1, LOW);
+  digitalWrite(in2, HIGH);
+  digitalWrite(in3, HIGH);
+  digitalWrite(in4, LOW);
+}
+
+void forward() {
+  digitalWrite(in1, HIGH);
+  digitalWrite(in2, LOW);
+  digitalWrite(in3, HIGH);
+  digitalWrite(in4, LOW);
+}
+
+void stop() {
+  analogWrite(ena, 0);
+  analogWrite(enb, 0);
+  digitalWrite(in1, LOW);
+  digitalWrite(in2, LOW);
+  digitalWrite(in3, LOW);
+  digitalWrite(in4, LOW);
+  prev_error = 0;
+  integral = 0;
+}

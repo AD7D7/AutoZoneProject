@@ -1,0 +1,148 @@
+import cv2
+import numpy as np
+import time
+import requests
+
+class EnhancedLaneTracker:
+    def __init__(self, stream_url):
+        self.STREAM_URL = stream_url
+        self.cap = cv2.VideoCapture(self.STREAM_URL)
+        self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 2)
+        
+        # Verify stream connection
+        if not self.cap.isOpened():
+            raise ConnectionError("Failed to connect to camera stream")
+
+        # Perspective transform setup
+        self.tl = (200, 338)
+        self.bl = (70, 472)
+        self.tr = (415, 338)
+        self.br = (592, 462)
+        self.pts1 = np.float32([self.tl, self.bl, self.tr, self.br])
+        self.pts2 = np.float32([[0, 0], [0, 480], [640, 0], [640, 480]])
+        self.matrix = cv2.getPerspectiveTransform(self.pts1, self.pts2)
+        
+        # Color thresholds
+        self.lower = np.array([0, 0, 200])
+        self.upper = np.array([255, 50, 255])
+        
+        # Tracking variables
+        self.prev_left = 0.0
+        self.prev_right = 0.0
+        self.frame_width = 640
+        self.frame_center = self.frame_width // 2
+
+    def process_frame(self, frame):
+        # Resize and perspective transform
+        frame = cv2.resize(frame, (640, 480))
+        transformed = cv2.warpPerspective(frame, self.matrix, (640, 480))
+        hsv = cv2.cvtColor(transformed, cv2.COLOR_BGR2HSV)
+        mask = cv2.inRange(hsv, self.lower, self.upper)
+        return mask, transformed, frame
+
+    def detect_and_draw_lanes(self, mask, raw_frame):
+        # Create visualization overlay
+        overlay = raw_frame.copy()
+        cv2.polylines(overlay, [np.array([self.tl, self.bl, self.br, self.tr], dtype=np.int32)], 
+                     True, (0,255,0), 2)
+
+        # Lane detection logic
+        histogram = np.sum(mask[mask.shape[0]//2:, :], axis=0)
+        midpoint = histogram.shape[0] // 2
+        left_base = np.argmax(histogram[:midpoint])
+        right_base = np.argmax(histogram[midpoint:]) + midpoint
+        
+        y, lx, rx = 472, [], []
+        
+        while y > 40:
+            # Left lane processing
+            left_roi = mask[y-40:y, max(0, left_base-50):left_base+50]
+            if left_roi.any():
+                contours, _ = cv2.findContours(left_roi, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                for contour in contours:
+                    M = cv2.moments(contour)
+                    if M["m00"] > 100:
+                        cx = int(M["m10"]/M["m00"])
+                        lx.append(left_base - 50 + cx + max(0, left_base-50))
+                        left_base = lx[-1]
+                        cv2.circle(overlay, (lx[-1], y), 5, (255,0,0), -1)
+
+            # Right lane processing
+            right_roi = mask[y-40:y, right_base-50:min(right_base+50, mask.shape[1])]
+            if right_roi.any():
+                contours, _ = cv2.findContours(right_roi, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                for contour in contours:
+                    M = cv2.moments(contour)
+                    if M["m00"] > 100:
+                        cx = int(M["m10"]/M["m00"])
+                        rx.append(right_base - 50 + cx)
+                        right_base = rx[-1]
+                        cv2.circle(overlay, (rx[-1], y), 5, (0,0,255), -1)
+
+            y -= 40
+
+        return overlay, lx, rx
+
+    def get_visualized_data(self):
+        ret, frame = self.cap.read()
+        if not ret:
+            return None, self.prev_left, self.prev_right
+
+        mask, transformed, raw_frame = self.process_frame(frame)
+        overlay, lx, rx = self.detect_and_draw_lanes(mask, raw_frame)
+        
+        # Combine visualizations
+        combined = np.hstack((
+            cv2.addWeighted(raw_frame, 0.7, overlay, 0.3, 0),
+            cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR),
+            transformed
+        ))
+        
+        # Calculate normalized positions
+        left_pos = np.mean(lx) if lx else self.prev_left
+        right_pos = np.mean(rx) if rx else self.prev_right
+        
+        left_norm = (left_pos - self.frame_center) / self.frame_center
+        right_norm = (right_pos - self.frame_center) / self.frame_center
+        
+        self.prev_left = left_norm if lx else self.prev_left
+        self.prev_right = right_norm if rx else self.prev_right
+
+        return combined, float(left_norm), float(right_norm)
+
+    def release(self):
+        self.cap.release()
+        cv2.destroyAllWindows()
+
+# Usage with live visualization
+if __name__ == "__main__":
+    # Fix the stream URL (add missing slash)
+    tracker = EnhancedLaneTracker("http://192.168.4.3/stream")
+    
+    try:
+        while True:
+            start_time = time.time()
+            
+            visualized_frame, left, right = tracker.get_visualized_data()
+            
+            if visualized_frame is not None:
+                # Display processed frame
+                cv2.imshow('Lane Tracking Visualization', visualized_frame)
+                
+                # Display numerical data
+                print(f"Left: {left:.2f} | Right: {right:.2f} | Center Offset: {(left + right)/2:.2f}")
+                
+                # Exit on 'q' key
+                if cv2.waitKey(1) & 0xFF == ord('q'):
+                    break
+
+            # Maintain ~10 FPS processing
+            elapsed = time.time() - start_time
+            if elapsed < 0.1:
+                time.sleep(0.1 - elapsed)
+                
+    except KeyboardInterrupt:
+        pass
+    finally:
+        tracker.release()
+        print("System shutdown gracefully")

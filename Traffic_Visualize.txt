@@ -1,0 +1,153 @@
+# traffic_sign_detector.py
+from ultralytics import YOLO
+import cv2
+import time
+import threading
+import numpy as np
+
+class TrafficSignDetector:
+    def __init__(self, stream_url, model_path, confidence_thresh=0.6):
+        """
+        Initialize traffic sign detector with live visualization
+        :param stream_url: ESP32-CAM HTTP stream URL (e.g., 'http://192.168.1.10/stream')
+        :param model_path: Path to YOLO model weights
+        :param confidence_thresh: Minimum detection confidence threshold
+        """
+        self.stream_url = stream_url
+        self.model = YOLO(model_path)
+        self.conf_thresh = confidence_thresh
+        self.running = False
+        self.current_signs = []
+        self.current_frame = None
+        self.lock = threading.Lock()
+        
+        # Initialize class names (keep your existing list)
+        self.class_names = [
+            'Ahead only', 'Beware of ice-snow', 'Bicycles crossing', 'Bumpy road',
+            'Children crossing', 'Dangerous curve to the left', 'Dangerous curve to the right',
+            'Double curve', 'End of all speed and passing limits', 'End of no passing',
+            'End of no passing by vehicles over 3-5 metric tons', 'End of speed limit -80km-h-',
+            'General caution', 'Go straight or left', 'Go straight or right', 'Keep left',
+            'Keep right', 'No Horn', 'No Left Turn', 'No Overtaking', 'No Parking',
+            'No Right Turn', 'No Straight', 'No U Turn', 'No entry',
+            'No passing for vehicles over 3-5 metric tons', 'No stop', 'No vehicles',
+            'Parking', 'Pedestrian Crossing', 'Pedestrians', 'Priority road',
+            'Right-of-way at the next intersection', 'Road narrows on the right',
+            'Road work', 'Roundabout mandatory', 'Slippery road', 'Speed limit -100km-h-',
+            'Speed limit -120km-h-', 'Speed limit -20km-h-', 'Speed limit -30km-h-',
+            'Speed limit -40km-h-', 'Speed limit -50km-h-', 'Speed limit -60km-h-',
+            'Speed limit -70km-h-', 'Speed limit -80km-h-', 'Stop', 'Traffic signals',
+            'Turn left ahead', 'Turn right ahead', 'Vehicles over 3-5 metric tons prohibited',
+            'Wild animals crossing', 'Yield'
+        ]
+
+        # Initialize video capture with buffer configuration
+        self.cap = cv2.VideoCapture(self.stream_url)
+        self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 2)
+        if not self.cap.isOpened():
+            raise RuntimeError(f"Could not open video stream at {self.stream_url}")
+
+    def _process_frames(self):
+        """Frame processing thread with visualization"""
+        while self.running:
+            ret, frame = self.cap.read()
+            if not ret:
+                time.sleep(0.1)
+                continue
+
+            # Process frame
+            resized_frame = cv2.resize(frame, (640, 480))
+            results = self.model(resized_frame, verbose=False, conf=self.conf_thresh)[0]
+            
+            # Create annotated frame
+            annotated_frame = resized_frame.copy()
+            current_detections = []
+            
+            for box in results.boxes:
+                if 0 <= int(box.cls) < len(self.class_names):
+                    x1, y1, x2, y2 = map(int, box.xyxy[0].cpu().numpy())
+                    confidence = float(box.conf)
+                    class_name = self.class_names[int(box.cls)]
+                    
+                    # Draw bounding box and label
+                    cv2.rectangle(annotated_frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                    cv2.putText(annotated_frame, 
+                               f"{class_name} {confidence:.2f}",
+                               (x1, y1 - 10), 
+                               cv2.FONT_HERSHEY_SIMPLEX, 
+                               0.7, (0, 255, 0), 2)
+                    
+                    current_detections.append({
+                        'sign': class_name,
+                        'confidence': confidence,
+                        'position': [x1, y1, x2, y2]
+                    })
+
+            # Update shared state
+            with self.lock:
+                self.current_signs = current_detections
+                self.current_frame = annotated_frame
+
+    def get_annotated_frame(self):
+        """
+        Get current frame with visualizations
+        :return: Annotated frame as numpy array
+        """
+        with self.lock:
+            return self.current_frame.copy() if self.current_frame is not None else None
+
+    def get_detections(self):
+        """
+        Get current detected traffic signs
+        :return: List of dictionaries containing sign details
+        """
+        with self.lock:
+            return self.current_signs.copy()
+
+    def start(self):
+        """Start the detection thread"""
+        self.running = True
+        threading.Thread(target=self._process_frames, daemon=True).start()
+
+    def stop(self):
+        """Stop detection and release resources"""
+        self.running = False
+        self.cap.release()
+        cv2.destroyAllWindows()
+
+if __name__ == "__main__":
+    # Initialize detector with your stream URL and model path
+    detector = TrafficSignDetector(
+        stream_url='http://192.168.1.10/stream',
+        model_path='D:\\Dowenloads\\best2.pt'
+    )
+    
+    try:
+        print("Starting traffic sign detection...")
+        detector.start()
+        
+        while True:
+            # Get annotated frame
+            frame = detector.get_annotated_frame()
+            
+            if frame is not None:
+                # Display the annotated frame
+                cv2.imshow('Traffic Sign Detection - ESP32-CAM', frame)
+                
+                # Print detections to console
+                signs = detector.get_detections()
+                if signs:
+                    print(f"Detected: {[s['sign'] for s in signs]}")
+                
+                # Exit on 'q' key press
+                if cv2.waitKey(1) & 0xFF == ord('q'):
+                    break
+            else:
+                print("Waiting for frames...")
+                time.sleep(0.1)
+                
+    except KeyboardInterrupt:
+        pass
+    finally:
+        detector.stop()
+        print("Detection stopped and resources released")

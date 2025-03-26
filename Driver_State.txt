@@ -1,0 +1,109 @@
+# driver_state_.py
+from scipy.spatial import distance
+from imutils import face_utils
+import dlib
+import cv2
+import threading
+import time
+
+class DriverStateDetector:
+    def __init__(self, video_source=0, ear_threshold=0.25, consecutive_frames=10):
+        """
+        Initialize driver state detector
+        :param video_source: Camera source (default 0)+
+        :param ear_threshold: Eye Aspect Ratio threshold (default 0.25)
+        :param consecutive_frames: Consecutive frames below threshold to trigger alert
+        """
+        self.video_source = video_source
+        self.ear_threshold = ear_threshold
+        self.consecutive_frames = consecutive_frames
+        self.running = False
+        self.state = "awake"
+        self.lock = threading.Lock()
+        
+        # Initialize face detectors
+        self.detector = dlib.get_frontal_face_detector()
+        self.predictor = dlib.shape_predictor("shape_predictor_68_face_landmarks.dat")
+        
+        # Define eye indexes
+        (self.lStart, self.lEnd) = face_utils.FACIAL_LANDMARKS_68_IDXS["left_eye"]
+        (self.rStart, self.rEnd) = face_utils.FACIAL_LANDMARKS_68_IDXS["right_eye"]
+
+    def _eye_aspect_ratio(self, eye):
+        """Calculate Eye Aspect Ratio (EAR)"""
+        A = distance.euclidean(eye[1], eye[5])
+        B = distance.euclidean(eye[2], eye[4])
+        C = distance.euclidean(eye[0], eye[3])
+        return (A + B) / (2.0 * C)
+
+    def _process_frames(self):
+        """Internal frame processing loop"""
+        cap = cv2.VideoCapture(self.video_source)
+        frame_counter = 0
+        
+        while self.running:
+            ret, frame = cap.read()
+            if not ret:
+                break
+
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            faces = self.detector(gray, 0)
+            
+            current_state = "awake"
+            for face in faces:
+                shape = self.predictor(gray, face)
+                shape = face_utils.shape_to_np(shape)
+                
+                left_eye = shape[self.lStart:self.lEnd]
+                right_eye = shape[self.rStart:self.rEnd]
+                
+                left_ear = self._eye_aspect_ratio(left_eye)
+                right_ear = self._eye_aspect_ratio(right_eye)
+                ear = (left_ear + right_ear) / 2.0
+
+                if ear < self.ear_threshold:
+                    frame_counter += 1
+                    if frame_counter >= self.consecutive_frames:
+                        current_state = "sleeping"
+                else:
+                    frame_counter = 0
+                    current_state = "awake"
+
+            with self.lock:
+                self.state = current_state
+
+        cap.release()
+
+    def get_state(self):
+        """
+        Get current driver state
+        :return: String - "awake" or "sleeping"
+        """
+        with self.lock:
+            return self.state
+
+    def start(self):
+        """Start detection thread"""
+        self.running = True
+        threading.Thread(target=self._process_frames, daemon=True).start()
+
+    def stop(self):
+        """Stop detection and release resources"""
+        self.running = False
+
+if __name__ == "__main__":
+    # Example usage
+    detector = DriverStateDetector()
+    
+    try:
+        detector.start()
+        while True:
+            state = detector.get_state()
+            print(f"Driver state: {state.upper()}")
+            time.sleep(0.1)
+            
+    except KeyboardInterrupt:
+        detector.stop()
+
+
+    

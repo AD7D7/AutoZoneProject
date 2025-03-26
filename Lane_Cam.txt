@@ -1,0 +1,153 @@
+#include "esp_camera.h"
+#include <WiFi.h>
+#include <WebServer.h>
+#include <ArduinoJson.h>
+
+#define CAMERA_MODEL_AI_THINKER
+#include "camera_pins.h"
+
+// WiFi Configuration
+const char* ssid = "family";
+const char* password = "ad7fadolokaah1mozaanosh21/14_6*7Family";
+
+// UART Configuration (Changed pins to avoid conflict with camera)
+#define UART_BAUD 115200
+#define UART_TX_PIN 1  // Changed from 17
+#define UART_RX_PIN 3  // Changed from 16
+
+WebServer server(80);
+
+// Camera Endpoints Setup
+void setupCameraEndpoints() {
+  server.on("/capture", HTTP_GET, []() {
+    camera_fb_t* fb = esp_camera_fb_get();
+    if (!fb) {
+      server.send(500, "text/plain", "Camera capture failed");
+      return;
+    }
+    server.sendHeader("Content-Type", "image/jpeg");
+    server.sendHeader("Content-Length", String(fb->len));
+    server.send(200);
+    server.sendContent((const char*)fb->buf, fb->len);
+    esp_camera_fb_return(fb);
+  });
+
+  server.on("/stream", HTTP_GET, []() {
+    WiFiClient client = server.client();
+    client.println("HTTP/1.1 200 OK");
+    client.println("Content-Type: multipart/x-mixed-replace; boundary=frame");
+    client.println();
+
+    while (client.connected()) {
+      camera_fb_t* fb = esp_camera_fb_get();
+      if (!fb) {
+        Serial.println("Camera capture failed");
+        break;
+      }
+
+      client.println("--frame");
+      client.println("Content-Type: image/jpeg");
+      client.printf("Content-Length: %d\r\n\r\n", fb->len);
+      client.write(fb->buf, fb->len);
+      esp_camera_fb_return(fb);
+      delay(33);
+    }
+  });
+}
+void handleData() {
+  if (server.method() == HTTP_POST) { // Handles POST requests to /data
+    String body = server.arg("plain"); // Get data from request body
+
+    StaticJsonDocument doc; // JSON document for incoming data
+    DeserializationError error = deserializeJson(doc, body); // Parse JSON
+
+    if (error) { // Error handling
+      server.send(400, "text/plain", "Invalid JSON");
+      return;
+    }
+
+    // Extract data from JSON
+    float lane_left = doc["lane_left"];
+    float lane_right = doc["lane_right"];
+    String driver_state = doc["driver_state"];
+    String traffic_sign = doc["traffic_sign"];
+
+    // Create JSON for Arduino
+    StaticJsonDocument arduinoDoc;
+    arduinoDoc["ll"] = lane_left;
+    arduinoDoc["lr"] = lane_right;
+    arduinoDoc["ds"] = driver_state;
+    arduinoDoc["ts"] = traffic_sign;
+
+    String output;
+    serializeJson(arduinoDoc, output); // Serialize JSON
+    Serial2.println(output);           // Send over UART
+
+    server.send(200, "text/plain", "Data received"); // Confirmation
+  }
+}
+
+void setup() {
+  Serial.begin(115200);
+  Serial2.begin(UART_BAUD, SERIAL_8N1, UART_RX_PIN, UART_TX_PIN);
+
+  // Camera Configuration with Safe Parameters
+  camera_config_t config;
+  config.ledc_channel = LEDC_CHANNEL_0;
+  config.ledc_timer = LEDC_TIMER_0;
+  config.pin_d0 = Y2_GPIO_NUM;
+  config.pin_d1 = Y3_GPIO_NUM;
+  config.pin_d2 = Y4_GPIO_NUM;
+  config.pin_d3 = Y5_GPIO_NUM;
+  config.pin_d4 = Y6_GPIO_NUM;
+  config.pin_d5 = Y7_GPIO_NUM;
+  config.pin_d6 = Y8_GPIO_NUM;
+  config.pin_d7 = Y9_GPIO_NUM;
+  config.pin_xclk = XCLK_GPIO_NUM;
+  config.pin_pclk = PCLK_GPIO_NUM;
+  config.pin_vsync = VSYNC_GPIO_NUM;
+  config.pin_href = HREF_GPIO_NUM;
+  config.pin_sccb_sda = SIOD_GPIO_NUM;
+  config.pin_sccb_scl = SIOC_GPIO_NUM;
+  config.pin_pwdn = PWDN_GPIO_NUM;
+  config.pin_reset = RESET_GPIO_NUM;
+  config.xclk_freq_hz = 10000000;  // Reduced from 20MHz
+  config.pixel_format = PIXFORMAT_JPEG;
+  config.frame_size = FRAMESIZE_VGA;  // Reduced from SVGA
+  config.jpeg_quality = 15;           // Increased from 12
+  config.fb_count = 1;                // Reduced from 2
+
+  // Camera Initialization with Error Handling
+  esp_err_t err = esp_camera_init(&config);
+  if (err != ESP_OK) {
+    Serial.printf("Camera init failed: 0x%x", err);
+    ESP.restart();
+  }
+
+  // WiFi Connection with Timeout
+  WiFi.begin(ssid, password);
+  unsigned long wifiStartTime = millis();
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+    if (millis() - wifiStartTime > 20000) {
+      Serial.println("\nWiFi Connection Failed!");
+      ESP.restart();
+    }
+  }
+  Serial.println("\nWiFi Connected");
+
+  // Server Configuration
+  server.on("/data", HTTP_POST, handleData);
+  setupCameraEndpoints();
+  server.begin();
+
+  Serial.print("Stream URL: http://");
+  Serial.print(WiFi.localIP());
+  Serial.println("/stream");
+}
+
+void loop() {
+  server.handleClient();
+  delay(2);
+}
